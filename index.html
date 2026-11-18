@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Adivina la Peli de Marvel</title>
+  <style>
+    body {
+      background-color: #121212;
+      color: #ffffff;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 { color: #e62429; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 5px; }
+    #score-board { font-size: 1.2rem; margin-bottom: 15px; color: #bbb; display: flex; gap: 20px; }
+    #scene-container {
+      width: 100%;
+      max-width: 800px;
+      aspect-ratio: 16 / 9;
+      background-color: #1e1e1e;
+      border: 2px solid #333;
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+    }
+    #scene-img { width: 100%; height: 100%; object-fit: cover; display: none; }
+    .controls { display: flex; gap: 10px; width: 100%; max-width: 600px; position: relative; }
+    .input-wrapper { flex: 1; position: relative; }
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px 15px;
+      font-size: 1rem;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #222;
+      color: white;
+      outline: none;
+    }
+    input:focus { border-color: #e62429; }
+    #suggestions {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: #1e1e1e;
+      border: 1px solid #444;
+      border-top: none;
+      border-radius: 0 0 6px 6px;
+      max-height: 220px;
+      overflow-y: auto;
+      z-index: 100;
+      display: none;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.8);
+    }
+    .suggestion-item {
+      padding: 10px 15px;
+      cursor: pointer;
+      border-bottom: 1px solid #2a2a2a;
+      font-size: 0.95rem;
+    }
+    .suggestion-item:hover, .suggestion-item.active {
+      background-color: #e62429;
+      color: white;
+    }
+    button {
+      padding: 12px 20px;
+      font-size: 1rem;
+      font-weight: bold;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      background-color: #e62429;
+      color: white;
+      transition: background 0.2s;
+    }
+    button:hover { background-color: #b81d22; }
+    button.secondary { background-color: #333; }
+    button.secondary:hover { background-color: #444; }
+    #feedback { margin-top: 15px; font-size: 1.2rem; font-weight: bold; min-height: 28px; text-align: center; }
+  </style>
+</head>
+<body>
+
+  <h1>Marvel Frame Quiz</h1>
+  <div id="score-board">
+    <span>Racha: <strong id="streak">0</strong></span>
+    <span>Mejor racha: <strong id="best-streak">0</strong></span>
+  </div>
+
+  <div id="scene-container">
+    <p id="loading">Cargando escena de Marvel...</p>
+    <img id="scene-img" src="" alt="Escena de Marvel">
+  </div>
+
+  <div class="controls">
+    <div class="input-wrapper">
+      <input type="text" id="guess-input" placeholder="Escribí la película o serie..." autocomplete="off">
+      <div id="suggestions"></div>
+    </div>
+    <button id="guess-btn" onclick="checkGuess()">Adivinar</button>
+    <button id="skip-btn" class="secondary" onclick="skipRound()">Saltar</button>
+  </div>
+
+  <div id="feedback"></div>
+
+  <script>
+    const API_KEY = '8e02f5b76d55c3cff72adceec9ddc29b'; // <-- VOLVÉ A PEGAR TU API KEY ACÁ
+    const MARVEL_COMPANY_ID = 420;
+    let catalog = [];
+    let allTitles = [];
+    let currentItem = null;
+    let streak = 0;
+    let bestStreak = 0;
+    let roundLocked = false;
+    let selectedIndex = -1;
+
+    const inputEl = document.getElementById('guess-input');
+    const suggestionsEl = document.getElementById('suggestions');
+
+    // Quita tildes, mayúsculas y signos para comparar fácil
+    function normalize(str) {
+      return str
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9\s]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    // Calcula qué tan parecidas son dos palabras/frases (distancia de Levenshtein)
+    function similarity(s1, s2) {
+      let longer = s1.length > s2.length ? s1 : s2;
+      let shorter = s1.length > s2.length ? s2 : s1;
+      if (longer.length === 0) return 1.0;
+      const costs = [];
+      for (let i = 0; i <= longer.length; i++) {
+        let lastValue = i;
+        for (let j = 0; j <= shorter.length; j++) {
+          if (i === 0) costs[j] = j;
+          else if (j > 0) {
+            let newValue = costs[j - 1];
+            if (longer.charAt(i - 1) !== shorter.charAt(j - 1)) {
+              newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
+            }
+            costs[j - 1] = lastValue;
+            lastValue = newValue;
+          }
+        }
+        if (i > 0) costs[shorter.length] = lastValue;
+      }
+      return (longer.length - costs[shorter.length]) / longer.length;
+    }
+
+    async function initGame() {
+      try {
+        const endpoints = [
+          `https://api.themoviedb.org/3/discover/movie?api_key=${API_KEY}&with_companies=${MARVEL_COMPANY_ID}&language=es-MX&page=1`,
+          `https://api.themoviedb.org/3/discover/movie?api_key=${API_KEY}&with_companies=${MARVEL_COMPANY_ID}&language=es-MX&page=2`,
+          `https://api.themoviedb.org/3/discover/tv?api_key=${API_KEY}&with_companies=${MARVEL_COMPANY_ID}&language=es-MX&page=1`
+        ];
+
+        const responses = await Promise.all(endpoints.map(url => fetch(url).then(r => r.json())));
+        const titleSet = new Set();
+
+        responses.forEach((data, index) => {
+          const isTv = index === 2;
+          data.results.forEach(item => {
+            if (item.backdrop_path) {
+              const title = isTv ? item.name : item.title;
+              const originalTitle = isTv ? item.original_name : item.original_title;
+              catalog.push({ id: item.id, type: isTv ? 'tv' : 'movie', title, originalTitle });
+              titleSet.add(title);
+              titleSet.add(originalTitle);
+            }
+          });
+        });
+
+        allTitles = Array.from(titleSet).sort();
+        nextRound();
+      } catch (err) {
+        document.getElementById('loading').innerText = 'Error al cargar. Revisá tu API Key.';
+      }
+    }
+
+    // Filtrado en vivo mientras escribís
+    inputEl.addEventListener('input', () => {
+      const query = normalize(inputEl.value);
+      suggestionsEl.innerHTML = '';
+      selectedIndex = -1;
+
+      if (!query) {
+        suggestionsEl.style.display = 'none';
+        return;
+      }
+
+      const matches = allTitles.filter(t => normalize(t).includes(query)).slice(0, 8);
+
+      if (matches.length === 0) {
+        suggestionsEl.style.display = 'none';
+        return;
+      }
+
+      matches.forEach(title => {
+        const div = document.createElement('div');
+        div.className = 'suggestion-item';
+        div.innerText = title;
+        div.onclick = () => {
+          inputEl.value = title;
+          suggestionsEl.style.display = 'none';
+          checkGuess();
+        };
+        suggestionsEl.appendChild(div);
+      });
+
+      suggestionsEl.style.display = 'block';
+    });
+
+    // Navegación con flechas arriba/abajo y Enter
+    inputEl.addEventListener('keydown', (e) => {
+      const items = suggestionsEl.querySelectorAll('.suggestion-item');
+      if (e.key === 'ArrowDown' && items.length > 0) {
+        e.preventDefault();
+        selectedIndex = (selectedIndex + 1) % items.length;
+        updateSelection(items);
+      } else if (e.key === 'ArrowUp' && items.length > 0) {
+        e.preventDefault();
+        selectedIndex = (selectedIndex - 1 + items.length) % items.length;
+        updateSelection(items);
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (selectedIndex >= 0 && items[selectedIndex]) {
+          inputEl.value = items[selectedIndex].innerText;
+          suggestionsEl.style.display = 'none';
+        }
+        checkGuess();
+      }
+    });
+
+    function updateSelection(items) {
+      items.forEach((item, idx) => {
+        item.classList.toggle('active', idx === selectedIndex);
+      });
+    }
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.input-wrapper')) {
+        suggestionsEl.style.display = 'none';
+      }
+    });
+
+    async function nextRound() {
+      roundLocked = false;
+      suggestionsEl.style.display = 'none';
+      document.getElementById('feedback').innerText = '';
+      inputEl.value = '';
+      inputEl.disabled = false;
+      document.getElementById('scene-img').style.display = 'none';
+      document.getElementById('loading').style.display = 'block';
+
+      currentItem = catalog[Math.floor(Math.random() * catalog.length)];
+
+      const imgRes = await fetch(`https://api.themoviedb.org/3/${currentItem.type}/${currentItem.id}/images?api_key=${API_KEY}`);
+      const imgData = await imgRes.json();
+
+      const cleanBackdrops = imgData.backdrops.filter(b => b.iso_639_1 === null);
+      const pool = cleanBackdrops.length > 0 ? cleanBackdrops : imgData.backdrops;
+      const randomImg = pool[Math.floor(Math.random() * pool.length)];
+
+      const imgEl = document.getElementById('scene-img');
+      imgEl.src = `https://image.tmdb.org/t/p/w1280${randomImg.file_path}`;
+      imgEl.onload = () => {
+        document.getElementById('loading').style.display = 'none';
+        imgEl.style.display = 'block';
+        inputEl.focus();
+      };
+    }
+
+    function isCloseEnough(guess, target) {
+      const g = normalize(guess);
+      const t = normalize(target);
+      if (!g) return false;
+      if (g === t) return true;
+      // Si el título tiene subtítulo (ej: "Avengers: Endgame") y escribiste "Endgame" o "Avengers" (mínimo 5 letras)
+      if (g.length >= 5 && t.includes(g)) return true;
+      // Si le pifiaste a 1 o 2 letras (ej: "blak panter")
+      if (similarity(g, t) >= 0.78) return true;
+      return false;
+    }
+
+    function checkGuess() {
+      if (roundLocked) return;
+      const rawGuess = inputEl.value.trim();
+      if (!rawGuess) return;
+
+      roundLocked = true;
+      inputEl.disabled = true;
+      suggestionsEl.style.display = 'none';
+
+      const won = isCloseEnough(rawGuess, currentItem.title) || isCloseEnough(rawGuess, currentItem.originalTitle);
+
+      if (won) {
+        streak++;
+        if (streak > bestStreak) bestStreak = streak;
+        document.getElementById('streak').innerText = streak;
+        document.getElementById('best-streak').innerText = bestStreak;
+        document.getElementById('feedback').style.color = '#4caf50';
+        document.getElementById('feedback').innerText = `¡Correcto! Era ${currentItem.title} (${currentItem.originalTitle})`;
+        setTimeout(nextRound, 2000);
+      } else {
+        streak = 0;
+        document.getElementById('streak').innerText = streak;
+        document.getElementById('feedback').style.color = '#f44336';
+        document.getElementById('feedback').innerText = `¡Perdiste la racha! Era: ${currentItem.title} (${currentItem.originalTitle})`;
+        setTimeout(nextRound, 2500);
+      }
+    }
+
+    function skipRound() {
+      if (roundLocked) return;
+      roundLocked = true;
+      inputEl.disabled = true;
+      suggestionsEl.style.display = 'none';
+      streak = 0;
+      document.getElementById('streak').innerText = streak;
+      document.getElementById('feedback').style.color = '#ff9800';
+      document.getElementById('feedback').innerText = `Perdiste la racha. Era: ${currentItem.title} (${currentItem.originalTitle})`;
+      setTimeout(nextRound, 2500);
+    }
+
+    initGame();
+  </script>
+</body>
+</html>
